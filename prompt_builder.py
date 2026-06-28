@@ -8,10 +8,16 @@ import re
 from openai import OpenAI
 
 """
-完整prompt生成sql
+Prompt 构造模块
+
+负责将 Schema 信息、Few-shot 示例和用户问题组装为完整 Prompt。
+Schema 和示例在此集中维护，便于后续课程中动态扩展。
+
+新增 RULES（业务规则注入层）与 ERROR_GUARDS（错误防护层），
+通过 build_prompt 的可选参数控制是否注入，实现 Prompt 策略的灵活切换。
 """
 
-# ==================== Schema 与 Few-shot（同 v1）====================
+# ======================== Schema描述   ====================
 SCHEMA = """
 表：dim_customers（客户维度表）
 - customer_id INT 主键
@@ -62,9 +68,31 @@ SCHEMA = """
 - marketing_expense DECIMAL(12,2) 市场费用（属于销售费用子项）
 - logistics_expense DECIMAL(12,2) 物流费用
 - warranty_expense DECIMAL(12,2) 质保费用
+""" # 数据库 Schema信息从schema_generator文件中获取表结构信息
+
+# ==================== 规则注入层（第7课新增）====================
+RULES = """
+【关键业务规则】
+1. 收入口径："销售额""收入"均指不含税收入，统一使用 sales_orders.net_amount，禁止使用 gross_amount
+2. 成本口径："成本"指实际销售成本，计算公式为 dim_products.material_cost + dim_products.labor_cost
+3. 订单统计范围：统计收入、订单量、客单价等指标时，必须过滤 order_status = 'completed'，排除 cancelled 和 pending
+4. 汇率转换：涉及多币种收入汇总时，必须通过 order_date 和 currency 关联 exchange_rates 表，使用 rate_to_cny 折算为人民币
+5. 时间范围："最近N个月"使用 DATE_SUB(CURDATE(), INTERVAL N MONTH) 作为起始边界；"本月"指当月1日至当前日期
+6. 费用层级：selling_expense 是销售费用总项，包含 marketing_expense、logistics_expense、warranty_expense，汇总时不得重复计算
+7. 毛利计算：毛利 = net_amount - (material_cost + labor_cost) * quantity
 """
 
+# ==================== 错误防护层（第7课新增）====================
+ERROR_GUARDS = """
+【常见错误防护】
+- 字段选择：确认金额字段是 net_amount（不含税）还是 gross_amount（含税），除非明确要求"含税"，否则一律用 net_amount
+- Join 遗漏：只要查询涉及"收入"且存在 currency 字段，必须关联 exchange_rates 表做汇率转换
+- 过滤遗漏：所有收入类统计必须包含 WHERE order_status = 'completed'
+- 时间边界：使用 >= 和 < 组合表示闭开区间，避免跨月/跨年边界误差
+- 聚合维度：GROUP BY 字段必须与 SELECT 中的非聚合字段完全一致
+"""
 
+# ==================== Few-Shot 示例====================
 FEW_SHOT_EXAMPLES = """
 示例1：
 问题：查询已完成订单的总数量
@@ -78,7 +106,6 @@ SQL：SELECT c.customer_type, COUNT(*) AS order_count FROM sales_orders o JOIN d
 问题：查询2026年第一季度的总费用
 SQL：SELECT SUM(rd_expense + selling_expense + admin_expense + finance_expense) AS total_expense FROM finance_expenses WHERE expense_date >= '2026-01-01' AND expense_date < '2026-04-01';
 """
-
 
 # ==================== COT 引导与结构化约束 ====================
 COT_INSTRUCTION = """
@@ -104,42 +131,65 @@ OUTPUT_CONSTRAINTS = """
 """
 
 
-def build_prompt(user_question: str, few_shot: bool = True):
-    """构造包含 COT 和结构化约束的 Prompt（ICIO 框架）"""
+def build_prompt(user_question: str, few_shot: bool = True, use_rules: bool = False, use_guards: bool = False,):
+    """
+    构造发送给 LLM 的 Prompt
+
+    Args:
+        user_question: 用户的自然语言问题
+        use_few_shot: 是否使用 Few-shot 示例
+        use_rules: 是否注入业务规则层
+        use_guards: 是否注入错误防护层
+
+    Returns:
+        (system_message, user_message)
+    """
+
     system_msg = "你是一个专业的 SQL 生成助手，擅长根据业务问题生成标准 MySQL 查询语句。"
-    if few_shot:
-        prompt =f"""
+    if use_rules or use_guards:
+        system_msg = "你是一个专业的 SQL 生成助手，擅长根据业务问题生成标准 MySQL 查询语句。请严格遵守给定的业务规则，避免常见错误。"
+
+    prompt = f"""
     【数据库Schema】
     {SCHEMA}
-    
+    """
+    if use_rules:
+        prompt += f"""
+    【关键业务规则】
+    {RULES}
+    """
+
+    if few_shot:
+        prompt += f"""
     【示例】
     {FEW_SHOT_EXAMPLES}
-    
-    {COT_INSTRUCTION}
-    
-    {OUTPUT_CONSTRAINTS}
-    
-    【用户问题】
-    {user_question}
-    
-    请直接输出 SQL：
     """
-        return system_msg, prompt
 
-    else:
-        prompt = f"""请根据用户输入的问题，生成对应的 SQL 查询语句，请不要输出任何解释。
-        【数据库Schema】
-    {SCHEMA}
-    
+    if use_guards:
+        prompt += f"""
+    【常见错误防护】
+    {ERROR_GUARDS}
+    """
+
+    prompt += f"""
+    【COT 引导与结构化约束】
     {COT_INSTRUCTION}
-    
     {OUTPUT_CONSTRAINTS}
-    
+    """
+
+    if use_rules or use_guards:
+        prompt += """优先遵循【关键业务规则】和【常见错误防护】中的约束
+    """
+
+    prompt += f"""
     【用户问题】
     {user_question}
+    """
+
+    prompt += """
     请直接输出 SQL：
     """
-        return system_msg, prompt
+    return system_msg, prompt
 
 
 

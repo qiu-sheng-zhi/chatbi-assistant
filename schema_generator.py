@@ -9,19 +9,13 @@ Schema 自动生成工具
 import os
 from dotenv import load_dotenv
 
+from config import DB_CONFIG
+
 load_dotenv()
 
 import pymysql
 
 
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT", 3306)),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "database": os.getenv("DB_NAME", "chatbi_mvp"),
-    "charset": "utf8mb4"
-}
 
 
 def get_tables(cursor) -> list[str]:
