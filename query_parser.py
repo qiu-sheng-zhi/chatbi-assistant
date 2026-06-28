@@ -1,5 +1,8 @@
-# 简单验证，后面改为Query改写
+
 class QueryParser:
+    """
+    简单验证，后面改为Query改写
+    """
     def parse(self, query: str):
         """
         判断用户问题是否有效，判断标准如下：

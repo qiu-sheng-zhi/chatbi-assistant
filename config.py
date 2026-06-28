@@ -2,6 +2,10 @@ from dotenv import load_dotenv
 load_dotenv()
 import os
 
+"""
+定义配置信息
+"""
+
 # 数据库连接信息
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "localhost"),

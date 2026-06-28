@@ -11,7 +11,9 @@ client = OpenAI(
 )
 class LLMClient:
     def generate_sql(self,system_prompt: str, prompt: str) -> str:
-        """调用 LLM 生成 SQL"""
+        """
+        根据提示词，调用 LLM 生成 SQL
+        """
 
         response = client.chat.completions.create(
             model=os.getenv("LLM_MODEL"),

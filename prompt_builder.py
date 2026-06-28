@@ -7,7 +7,9 @@ load_dotenv()
 import re
 from openai import OpenAI
 
-# 完整prompt生成sql
+"""
+完整prompt生成sql
+"""
 
 # ==================== Schema 与 Few-shot（同 v1）====================
 SCHEMA = """
