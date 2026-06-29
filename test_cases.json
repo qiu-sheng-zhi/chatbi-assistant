@@ -31,15 +31,15 @@
     "id": "M02",
     "category": "medium",
     "question": "按产品线统计总收入",
-    "expected_sql": "SELECT p.product_line, SUM(o.net_amount) AS total_revenue FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line",
-    "description": "两表Join+收入聚合+过滤"
+    "expected_sql": "SELECT p.product_line, SUM(o.net_amount * r.rate_to_cny) AS total_revenue_cny FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id JOIN exchange_rates r ON o.order_date = r.rate_date AND o.currency = r.currency WHERE o.order_status = 'completed' GROUP BY p.product_line",
+    "description": "三表Join+收入人民币折算+分组聚合+过滤"
   },
   {
     "id": "M03",
     "category": "medium",
     "question": "查询欧洲市场最近三个月的总收入",
-    "expected_sql": "SELECT SUM(o.net_amount) AS total_revenue FROM sales_orders o JOIN dim_customers c ON o.customer_id = c.customer_id WHERE c.region = '欧洲' AND o.order_status = 'completed' AND o.order_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)",
-    "description": "两表Join+地区过滤+时间过滤+收入聚合"
+    "expected_sql": "SELECT SUM(o.net_amount * r.rate_to_cny) AS total_revenue_cny FROM sales_orders o JOIN dim_customers c ON o.customer_id = c.customer_id JOIN exchange_rates r ON o.order_date = r.rate_date AND o.currency = r.currency WHERE c.region = '欧洲' AND o.order_status = 'completed' AND o.order_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)",
+    "description": "三表Join+地区过滤+时间过滤+收入人民币折算"
   },
   {
     "id": "C01",
@@ -52,14 +52,14 @@
     "id": "C02",
     "category": "complex",
     "question": "按产品线统计平均客单价和订单数量",
-    "expected_sql": "SELECT p.product_line, AVG(o.net_amount) AS avg_order_value, COUNT(*) AS order_count FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' GROUP BY p.product_line",
-    "description": "两表Join+多聚合函数+分组"
+    "expected_sql": "SELECT p.product_line, SUM(o.net_amount * r.rate_to_cny) / COUNT(*) AS avg_order_value_cny, COUNT(*) AS order_count FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id JOIN exchange_rates r ON o.order_date = r.rate_date AND o.currency = r.currency WHERE o.order_status = 'completed' GROUP BY p.product_line",
+    "description": "三表Join+客单价人民币折算+订单数量+分组"
   },
   {
     "id": "C03",
     "category": "complex",
     "question": "查询上个月的销售额、销售成本及毛利",
-    "expected_sql": "SELECT SUM(o.net_amount) AS revenue, SUM((p.material_cost + p.labor_cost) * o.quantity) AS cost, SUM(o.net_amount) - SUM((p.material_cost + p.labor_cost) * o.quantity) AS gross_profit FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id WHERE o.order_status = 'completed' AND o.order_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') AND o.order_date < DATE_FORMAT(CURDATE(), '%Y-%m-01')",
-    "description": "两表Join+复杂计算字段+动态时间边界+多指标聚合"
+    "expected_sql": "SELECT SUM(o.net_amount * r.rate_to_cny) AS revenue_cny, SUM((p.material_cost + p.labor_cost) * o.quantity) AS cost, SUM(o.net_amount * r.rate_to_cny) - SUM((p.material_cost + p.labor_cost) * o.quantity) AS gross_profit_cny FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id JOIN exchange_rates r ON o.order_date = r.rate_date AND o.currency = r.currency WHERE o.order_status = 'completed' AND o.order_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') AND o.order_date < DATE_FORMAT(CURDATE(), '%Y-%m-01')",
+    "description": "三表Join+销售额人民币折算+成本+毛利+动态时间边界"
   }
 ]
