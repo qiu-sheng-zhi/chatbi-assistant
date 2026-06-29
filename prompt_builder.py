@@ -75,6 +75,9 @@ RULES = """
 5. 时间范围："最近N个月"使用 DATE_SUB(CURDATE(), INTERVAL N MONTH) 作为起始边界；"本月"指当月1日至当前日期
 6. 费用层级：selling_expense 是销售费用总项，包含 marketing_expense、logistics_expense、warranty_expense，汇总时不得重复计算
 7. 毛利计算：毛利 = net_amount - (material_cost + labor_cost) * quantity
+8. 当问题出现“大区”“区域市场”“欧洲市场”等表达时，优先使用 dim_customers.region。只有问题明确说“销售区域”时，才使用 sales_orders.region。
+9. 客单价口径："客单价""平均客单价""平均订单金额"均指已完成订单的平均订单收入，计算公式为 SUM(sales_orders.net_amount * exchange_rates.rate_to_cny) / COUNT(*)，必须按 order_date 和 currency 关联 exchange_rates 表折算为人民币，并过滤 sales_orders.order_status = 'completed'。
+10. 本季度时间范围：涉及"本季度"不要使用复杂嵌套 DATE_SUB 公式，"本季度"指当前日期所在季度的第一天到下一季度第一天，使用固定闭开区间表达。例如，当前日期为 2026-06-29 时，本季度为 order_date >= '2026-04-01' AND order_date < '2026-07-01'。
 """
 
 # ==================== 错误防护层（第7课新增）====================
@@ -85,6 +88,7 @@ ERROR_GUARDS = """
 - 过滤遗漏：所有收入类统计必须包含 WHERE order_status = 'completed'
 - 时间边界：使用 >= 和 < 组合表示闭开区间，避免跨月/跨年边界误差
 - 聚合维度：GROUP BY 字段必须与 SELECT 中的非聚合字段完全一致
+- 客单价防护：出现"客单价""平均客单价""平均订单金额"时，不要直接使用 AVG(unit_price)，应使用 SUM(net_amount * rate_to_cny) / COUNT(*)。
 """
 
 # ==================== Few-Shot 示例====================
