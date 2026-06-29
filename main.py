@@ -10,7 +10,7 @@ from query_parser import QueryParser
 from result_formatter import ResultFormatter
 
 
-DEFAULT_QUERY = "查询已完成订单的总数量"
+DEFAULT_QUERY = "按照客户类型查询平均订单金额和订单数量"
 
 
 class ChatBIMVP:
