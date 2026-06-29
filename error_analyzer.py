@@ -8,7 +8,16 @@
 """
 
 import re
+import os
+import json
 from typing import Optional
+
+from dotenv import load_dotenv
+from openai import OpenAI
+
+from prompt_builder import SCHEMA
+
+load_dotenv()
 
 
 class ErrorAnalyzer:
@@ -45,12 +54,17 @@ class ErrorAnalyzer:
                 r"SUM\(|AVG\(|COUNT\(",  # 聚合函数问题
             ],
         }
+        self.llm_client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            base_url=os.getenv("OPENAI_BASE_URL"),
+        )
 
     def categorize_error(
         self,
         sql: str,
         error_msg: Optional[str] = None,
-        question: Optional[str] = None
+        question: Optional[str] = None,
+        use_llm_fallback: bool = True
     ) -> dict:
         """
         对 SQL 错误进行分类
@@ -59,6 +73,7 @@ class ErrorAnalyzer:
             sql: LLM 生成的 SQL 语句
             error_msg: 数据库执行返回的错误信息（如有）
             question: 用户的原始问题
+            use_llm_fallback: 启发式规则无法判断时，是否调用大模型兜底分析
 
         Returns:
             包含错误类型、根因分析和修复建议的字典
@@ -67,7 +82,8 @@ class ErrorAnalyzer:
             "error_type": self.UNKNOWN,
             "root_cause": "",
             "suggestion": "",
-            "sql": sql
+            "sql": sql,
+            "analysis_source": "heuristic"
         }
 
         # 如果有数据库执行错误，优先判断语法类错误
@@ -86,11 +102,132 @@ class ErrorAnalyzer:
             result["error_type"] = primary_type
             result["root_cause"] = self._get_root_cause(primary_type, sql, question)
             result["suggestion"] = self._get_suggestion(primary_type)
+        # 如果启发式规则无法判断，且有 LLM 配置，则调用 LLM 进行分析
         else:
+            if use_llm_fallback:
+                return self.analyze_with_llm(
+                    question=question or "",
+                    sql=sql,
+                    schema=SCHEMA,
+                    error_msg=error_msg,
+                )
+
             result["root_cause"] = "无法从 SQL 中直接识别错误模式，需人工审查"
             result["suggestion"] = "将该用例加入 Few-shot 示例或增强 Schema 描述中的相关字段说明"
 
         return result
+
+    def analyze_with_llm(
+        self,
+        question: str,
+        sql: str,
+        schema: str = SCHEMA,
+        error_msg: Optional[str] = None
+    ) -> dict:
+        """
+        使用大模型分析启发式规则无法覆盖的 SQL 问题。
+
+        输入信息包含：用户问题、生成的 SQL、Schema 信息、可选数据库错误信息。
+        输出结构与 categorize_error 保持一致，便于上层流程统一处理。
+        """
+        system_prompt = """
+你是一个 Text2SQL 错误分析专家，负责判断大模型生成的 SQL 是否符合用户问题和数据库 Schema。
+请只基于给定的用户问题、SQL、Schema 和错误信息进行分析，不要臆造不存在的表或字段。
+"""
+
+        user_prompt = f"""
+【任务】
+分析下面的 SQL 是否存在业务逻辑错误、字段错误、Join 错误、时间范围错误、过滤条件遗漏、聚合错误或语法错误。
+
+【可选错误类型】
+- field_error：字段选择错误，例如收入错用 gross_amount，成本错用 standard_cost
+- join_error：关联路径错误，例如遗漏维度表或汇率表 Join
+- time_error：时间范围或动态日期计算错误
+- filter_error：遗漏关键业务过滤条件，例如 order_status = 'completed'
+- aggregation_error：聚合函数、GROUP BY 或统计口径错误
+- syntax_error：SQL 语法错误
+- unknown：无法确定，或未发现明显错误
+
+【用户问题】
+{question}
+
+【生成的 SQL】
+{sql}
+
+【数据库 Schema】
+{schema}
+
+【数据库执行错误】
+{error_msg or "无"}
+
+【输出要求】
+只输出 JSON，不要输出 Markdown，不要输出解释性文本。
+JSON 字段如下：
+{{
+  "has_error": true/false,
+  "error_type": "field_error | join_error | time_error | filter_error | aggregation_error | syntax_error | unknown",
+  "root_cause": "用一句中文说明根因",
+  "suggestion": "用一句中文说明修复建议",
+  "is_sql_correct": true,
+  "confidence": 0.0
+}}
+"""
+
+        try:
+            response = self.llm_client.chat.completions.create(
+                model=os.getenv("LLM_MODEL"),
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                max_tokens=1024,
+            )
+            raw_output = response.choices[0].message.content.strip()
+            llm_result = self._parse_llm_analysis(raw_output)
+        except Exception as exc:
+            return {
+                "error_type": self.UNKNOWN,
+                "root_cause": f"启发式规则未命中，且大模型分析失败：{exc}",
+                "suggestion": "人工审查该用例，并检查 LLM 配置或网络连接是否正常",
+                "sql": sql,
+                "analysis_source": "llm_failed",
+            }
+
+        llm_result["sql"] = sql
+        llm_result["analysis_source"] = "llm"
+        return llm_result
+
+    def _parse_llm_analysis(self, raw_output: str) -> dict:
+        """解析大模型返回的 JSON 分析结果。"""
+        cleaned = re.sub(r"```json|```", "", raw_output).strip()
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            data = json.loads(match.group(0)) if match else {}
+
+        allowed_types = {
+            self.FIELD_ERROR,
+            self.JOIN_ERROR,
+            self.TIME_ERROR,
+            self.FILTER_ERROR,
+            self.AGGREGATION_ERROR,
+            self.SYNTAX_ERROR,
+            self.UNKNOWN,
+        }
+        error_type = data.get("error_type", self.UNKNOWN)
+        if error_type not in allowed_types:
+            error_type = self.UNKNOWN
+
+        return {
+            "error_type": error_type,
+            "has_error": data.get("has_error", False),
+            "root_cause": data.get("root_cause", "大模型未返回明确根因"),
+            "suggestion": data.get("suggestion", "人工审查该用例并补充到测试集"),
+            "is_sql_correct": data.get("is_sql_correct"),
+            "confidence": data.get("confidence"),
+        }
 
     def _is_syntax_error(self, error_msg: str) -> bool:
         """判断是否为 SQL 语法错误"""
