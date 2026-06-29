@@ -163,7 +163,7 @@ class Evaluator:
             if r["error"]:
                 lines.append(f"  错误：{r['error']}")
             else:
-                lines.append(f"  生成 SQL：{r['generated_sql'][:80]}...")
+                lines.append(f"  生成 SQL：{r['generated_sql']}")
                 if not r["execution_match"]:
                     lines.append(f"  预期行数：{r['detail'].get('expected_row_count', 'N/A')}, "
                                f"生成行数：{r['detail'].get('generated_row_count', 'N/A')}")
@@ -189,9 +189,7 @@ class Evaluator:
         比较策略：
         1. 列数必须相同
         2. 行数必须相同
-        3. 根据查询类型决定是否检查列名：
-           - 纯聚合查询（SELECT 中只有聚合函数/常量）：只比较值，忽略列名
-           - 其他查询：比较列名+值
+        3. 维度列检查列名，聚合/计算指标列只比较值，不强制匹配别名
         4. 对结果排序后逐行比对（忽略行顺序）
         """
         if len(gen_columns) != len(exp_columns):
@@ -200,45 +198,55 @@ class Evaluator:
         if len(gen_results) != len(exp_results):
             return False
 
-        check_columns = (
-            self._should_check_column_names(exp_sql) or
-            self._should_check_column_names(gen_sql)
-        )
+        check_column_flags = self._get_column_name_check_flags(exp_sql, gen_sql)
+        if len(check_column_flags) != len(exp_columns):
+            return False
 
-        def normalize_rows(columns, rows, use_column_names: bool = True):
-            if use_column_names:
-                # 按列名排序后重组每行数据
-                indexed = [{col: str(val) for col, val in zip(columns, row)} for row in rows]
-                return sorted([tuple(sorted(d.items())) for d in indexed])
-            else:
-                # 忽略列名，只比较值的顺序
-                return sorted([tuple(str(val) for val in row) for row in rows])
+        for i, should_check in enumerate(check_column_flags):
+            if should_check and gen_columns[i].lower() != exp_columns[i].lower():
+                return False
 
-        gen_normalized = normalize_rows(gen_columns, gen_results, check_columns)
-        exp_normalized = normalize_rows(exp_columns, exp_results, check_columns)
+        def normalize_rows(rows):
+            return sorted([tuple(str(val) for val in row) for row in rows])
+
+        gen_normalized = normalize_rows(gen_results)
+        exp_normalized = normalize_rows(exp_results)
 
         return gen_normalized == exp_normalized
 
-    def _should_check_column_names(self, sql: str) -> bool:
+    def _get_column_name_check_flags(self, exp_sql: str, gen_sql: str) -> list[bool]:
         """
-        根据查询类型决定是否检查列名。
+        生成每一列是否需要检查列名的标记。
 
-        纯聚合查询（SELECT 中只有聚合函数调用或常量）的列名通常是工具性的
-        自动生成别名，语义等价时无需强制匹配列名。
+        维度列需要检查列名；聚合/计算指标列的别名可能由模型自动生成，
+        只比较执行结果值即可。
         """
+        exp_items = self._extract_select_items(exp_sql)
+        gen_items = self._extract_select_items(gen_sql)
+
+        if len(exp_items) != len(gen_items):
+            return []
+
+        flags = []
+        for exp_item, gen_item in zip(exp_items, gen_items):
+            should_check = (
+                self._should_check_select_item_column_name(exp_item) or
+                self._should_check_select_item_column_name(gen_item)
+            )
+            flags.append(should_check)
+        return flags
+
+    def _extract_select_items(self, sql: str) -> list[str]:
+        """提取 SELECT 子句中的每一个输出项。"""
         if not sql:
-            return True
+            return []
 
-        sql_upper = sql.upper()
-
-        # 提取 SELECT 子句（到第一个 FROM 为止）
-        match = re.search(r'SELECT\s+(.*?)(?:\s+FROM\s+)', sql_upper, re.DOTALL)
+        match = re.search(r'SELECT\s+(.*?)(?:\s+FROM\s+)', sql, re.IGNORECASE | re.DOTALL)
         if not match:
-            return True
+            return []
 
         select_clause = match.group(1).strip()
 
-        # 按逗号分割 SELECT 项，考虑嵌套括号
         items = []
         depth = 0
         current = []
@@ -257,26 +265,32 @@ class Evaluator:
         if current:
             items.append(''.join(current).strip())
 
-        # 检查每一项是否都是聚合函数调用或常量
-        for item in items:
-            # 去除 AS 别名
-            item_clean = re.split(r'\s+AS\s+', item, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        return items
 
-            # 聚合函数调用
-            if re.match(r'^\s*(?:COUNT|SUM|AVG|MAX|MIN)\s*\(', item_clean, re.IGNORECASE):
-                continue
-            # 纯数字常量
-            if re.match(r'^[\d+\-]?[\d]*\.?[\d]*$', item_clean):
-                continue
-            # 字符串常量
-            if re.match(r'^\'[^\']*\'$', item_clean) or re.match(r'^"[^"]*"$', item_clean):
-                continue
+    def _should_check_select_item_column_name(self, select_item: str) -> bool:
+        """
+        判断单个 SELECT 输出项是否需要检查列名。
 
-            # 包含原始列引用或其他表达式，需要检查列名
+        聚合/计算指标列通常由模型自动生成别名，语义等价时不强制匹配列名；
+        普通维度列仍然检查列名，避免 product_line、region 等维度错位。
+        """
+        if not select_item:
             return True
 
-        # 所有项都是聚合函数或常量，不检查列名
-        return False
+        # 去除 AS 别名，避免别名影响判断。
+        item_clean = re.split(r'\s+AS\s+', select_item, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+
+        # 只要 SELECT 项中包含聚合函数，就认为它是指标列。
+        if re.search(r'\b(?:COUNT|SUM|AVG|MAX|MIN)\s*\(', item_clean, re.IGNORECASE):
+            return False
+
+        # 常量列也不强制检查列名。
+        if re.match(r'^[\d+\-]?[\d]*\.?[\d]*$', item_clean):
+            return False
+        if re.match(r'^\'[^\']*\'$', item_clean) or re.match(r'^"[^"]*"$', item_clean):
+            return False
+
+        return True
 
 
 def run_evaluation(
