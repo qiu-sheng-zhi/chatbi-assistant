@@ -4,13 +4,14 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from database import DatabaseClient
+from indicator_knowledge import IndicatorKnowledge
 from llm_client import LLMClient
 from prompt_builder import build_prompt
 from query_parser import QueryParser
 from result_formatter import ResultFormatter
 
 
-DEFAULT_QUERY = "按照客户类型查询平均订单金额和订单数量"
+DEFAULT_QUERY = "查询上个月的利润"
 
 
 class ChatBIMVP:
@@ -22,6 +23,7 @@ class ChatBIMVP:
         self.llm_client = LLMClient()
         self.database = DatabaseClient()
         self.result_formatter = ResultFormatter()
+        self.indicator_knowledge = IndicatorKnowledge()
 
     def run(self, query: str) -> Optional[str]:
         """
@@ -40,13 +42,28 @@ class ChatBIMVP:
             return None
         print("[query_parser] 用户输入合法")
 
-        # 步骤 2：prompt_builder 根据用户问题构造 LLM 提示词。
-        system_prompt, user_prompt = build_prompt(query)
+        # 步骤 2：indicator_knowledge 识别问题中的业务指标，并生成指标知识块。
+        indicator_context = self.indicator_knowledge.get_indicator_context(query)
+        detected_indicators = indicator_context["detected_indicators"]
+        indicator_block = indicator_context["indicator_block"]
+        if detected_indicators:
+            print(f"[indicator_knowledge] 识别到指标：{', '.join(detected_indicators)}")
+        else:
+            print("[indicator_knowledge] 未识别到业务指标")
+
+        # 步骤 3：prompt_builder 根据用户问题、规则和指标知识构造 LLM 提示词。
+        system_prompt, user_prompt = build_prompt(
+            query,
+            use_few_shot=True,
+            use_rules=True,
+            use_guards=True,
+            indicator_knowledge=indicator_block,
+        )
         print("[prompt_builder] 提示词生成完成")
         print(f"[prompt_builder] system prompt 长度：{len(system_prompt)}")
         print(f"[prompt_builder] user prompt 长度：{len(user_prompt)}")
 
-        # 步骤 3：llm_client 调用大模型，把自然语言问题转换成 SQL。
+        # 步骤 4：llm_client 调用大模型，把自然语言问题转换成 SQL。
         try:
             sql = self.llm_client.generate_sql(system_prompt, user_prompt)
         except Exception as exc:
@@ -59,7 +76,7 @@ class ChatBIMVP:
         print(sql)
         print("-" * 80)
 
-        # 步骤 4：database 执行 SQL，返回字段名和查询结果。
+        # 步骤 5：database 执行 SQL，返回字段名和查询结果。
         try:
             columns, rows = self.database.execute(sql)
         except Exception as exc:
@@ -70,7 +87,7 @@ class ChatBIMVP:
         print("[database] SQL 执行完成")
         print(f"[database] 返回行数：{len(rows)}")
 
-        # 步骤 5：result_formatter 格式化查询结果，输出可读表格。
+        # 步骤 6：result_formatter 格式化查询结果，输出可读表格。
         print("[result_formatter] 查询结果格式化完成")
         print(self.result_formatter.format(columns, rows))
 

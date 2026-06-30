@@ -83,12 +83,10 @@ RULES = """
 # ==================== 错误防护层（第7课新增）====================
 ERROR_GUARDS = """
 【常见错误防护】
-- 字段选择：确认金额字段是 net_amount（不含税）还是 gross_amount（含税），除非明确要求"含税"，否则一律用 net_amount
-- Join 遗漏：只要查询涉及"收入"且存在 currency 字段，必须关联 exchange_rates 表做汇率转换
-- 过滤遗漏：所有收入类统计必须包含 WHERE order_status = 'completed'
-- 时间边界：使用 >= 和 < 组合表示闭开区间，避免跨月/跨年边界误差
+- 字段选择：除非明确要求"含税"，否则一律用 net_amount 而非 gross_amount
+- 客单价防护：出现"客单价"时，不要直接使用 AVG(unit_price)，应使用 SUM(net_amount * rate_to_cny) / COUNT(*)
 - 聚合维度：GROUP BY 字段必须与 SELECT 中的非聚合字段完全一致
-- 客单价防护：出现"客单价""平均客单价""平均订单金额"时，不要直接使用 AVG(unit_price)，应使用 SUM(net_amount * rate_to_cny) / COUNT(*)。
+- 时间边界：使用 >= 和 < 组合表示闭开区间，避免跨月/跨年边界误差
 """
 
 # ==================== Few-Shot 示例====================
@@ -124,13 +122,10 @@ OUTPUT_CONSTRAINTS = """
 2. 使用标准 MySQL 语法
 3. 确保字段名和表名与 Schema 一致
 4. 如果涉及多表查询，使用 JOIN 连接
-5. 收入口径统一使用 net_amount，成本口径使用 material_cost + labor_cost
-6. 统计销售额时，需要按订单日期的汇率转换为人民币
-7. 所有收入类统计必须包含 WHERE order_status = 'completed'
 """
 
 
-def build_prompt(user_question: str, few_shot: bool = True, use_rules: bool = False, use_guards: bool = False,):
+def build_prompt(user_question: str, use_few_shot: bool = True, use_rules: bool = False, use_guards: bool = False, indicator_knowledge: str = ""):
     """
     构造发送给 LLM 的 Prompt
 
@@ -139,6 +134,7 @@ def build_prompt(user_question: str, few_shot: bool = True, use_rules: bool = Fa
         use_few_shot: 是否使用 Few-shot 示例
         use_rules: 是否注入业务规则层
         use_guards: 是否注入错误防护层
+        indicator_knowledge: 业务指标知识注入
 
     Returns:
         (system_message, user_message)
@@ -158,7 +154,12 @@ def build_prompt(user_question: str, few_shot: bool = True, use_rules: bool = Fa
     {RULES}
     """
 
-    if few_shot:
+    if indicator_knowledge:
+        prompt += f"""
+    {indicator_knowledge}
+    """
+
+    if use_few_shot:
         prompt += f"""
     【示例】
     {FEW_SHOT_EXAMPLES}

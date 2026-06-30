@@ -61,5 +61,19 @@
     "question": "查询上个月的销售额、销售成本及毛利",
     "expected_sql": "SELECT SUM(o.net_amount * r.rate_to_cny) AS revenue_cny, SUM((p.material_cost + p.labor_cost) * o.quantity) AS cost, SUM(o.net_amount * r.rate_to_cny) - SUM((p.material_cost + p.labor_cost) * o.quantity) AS gross_profit_cny FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id JOIN exchange_rates r ON o.order_date = r.rate_date AND o.currency = r.currency WHERE o.order_status = 'completed' AND o.order_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') AND o.order_date < DATE_FORMAT(CURDATE(), '%Y-%m-01')",
     "description": "三表Join+销售额人民币折算+成本+毛利+动态时间边界"
+  },
+  {
+    "id": "I01",
+    "category": "complex",
+    "question": "查询上个月的利润",
+    "expected_sql": "SELECT gp.gross_profit_cny - fe.total_expense AS profit_cny FROM (SELECT SUM(o.net_amount * r.rate_to_cny) - SUM((p.material_cost + p.labor_cost) * o.quantity) AS gross_profit_cny FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id JOIN exchange_rates r ON o.order_date = r.rate_date AND o.currency = r.currency WHERE o.order_status = 'completed' AND o.order_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') AND o.order_date < DATE_FORMAT(CURDATE(), '%Y-%m-01')) gp CROSS JOIN (SELECT SUM(rd_expense + selling_expense + admin_expense + finance_expense) AS total_expense FROM finance_expenses WHERE expense_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') AND expense_date < DATE_FORMAT(CURDATE(), '%Y-%m-01')) fe",
+    "description": "利润计算：毛利-期间费用，需要跨四表+子查询+时间对齐"
+  },
+  {
+    "id": "I02",
+    "category": "complex",
+    "question": "查询上个月的毛利",
+    "expected_sql": "SELECT SUM(o.net_amount * r.rate_to_cny) - SUM((p.material_cost + p.labor_cost) * o.quantity) AS gross_profit_cny FROM sales_orders o JOIN dim_products p ON o.product_id = p.product_id JOIN exchange_rates r ON o.order_date = r.rate_date AND o.currency = r.currency WHERE o.order_status = 'completed' AND o.order_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') AND o.order_date < DATE_FORMAT(CURDATE(), '%Y-%m-01')",
+    "description": "毛利计算：收入-销售成本，需要三表Join+汇率转换+动态时间"
   }
 ]
